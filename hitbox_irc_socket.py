@@ -1,6 +1,7 @@
 # vim: sts=4:sw=4:et:tw=80:nosta
 import asyncio, aiohttp, config, json, logging, random, websockets
 from datetime import datetime
+import re
 
 class HitboxClient:
 
@@ -70,14 +71,9 @@ class HitboxClient:
 
         """
 
-        r = yield from aiohttp.request("GET",
-            "http://{}/socket.io/1/".format(self._server))
-        d = yield from r.read()
-        d = d.decode("UTF-8").split(":")[0]
-        self._token = d
+        self._token = self._logintoken
 
-        r.close()
-        return d
+        return self._token
 
     @asyncio.coroutine
     def establish_connection(self):
@@ -88,9 +84,11 @@ class HitboxClient:
 
         yield from self.select_server()
         yield from self.get_token()
+        self._log.debug(self._server)
+        self._log.debug(self._token)
         self._socket = yield from websockets.connect(
-            "ws://{}/socket.io/1/websocket/{}".format(
-                self._server, self._token))
+            "wss://{}/socket.io/?EIO=3&transport=websocket".format(
+                self._server))
 
         return self._socket
 
@@ -126,7 +124,7 @@ class HitboxClient:
                 break
             self._log.debug("< {}".format(msg))
 
-            if msg == "1::" and not self._loggedIn:
+            if re.match("^\d+\{", msg) and not self._loggedIn:
                 self._log.debug("Logging into channel #{}..." \
                     .format(self._channel))
                 yield from self.joinChannel()
@@ -134,8 +132,13 @@ class HitboxClient:
                 self._log.debug("PING? PONG!")
                 yield from self.pong()
             else:
-                json = msg[4:]
-                yield from self.dispatchMessage(json)
+                # The only incoming message I've seen that is not an array that
+                # looks like ["message", "encoded json"] is the first received
+                # message that contains the SID, which is not used when replying
+                # to the server. So for now I'm dropping objects
+                if re.match("^\d+\[", msg):
+                    json = "[{}".format(msg.split('[', 1)[-1])
+                    yield from self.dispatchMessage(json)
 
     @asyncio.coroutine
     def send(self, msg):
@@ -164,10 +167,10 @@ class HitboxClient:
         """Adds a message to the message queue and signals that a message is
         available, unblocking anything calling getNextMessage()"""
         try:
-            msg["args"]["method"] # this will throw an error normally
+            msg["method"] # this will throw an error normally
         except TypeError:
             self._log.debug(msg)
-            args = json.loads(json.loads(msg)["args"][0])
+            args = json.loads(json.loads(msg)[1])
             if args["method"] == "loginMsg":
                 asyncio.async(self.updateNickListEveryTen())
             if args["method"] == "userList":
@@ -197,25 +200,23 @@ class HitboxClient:
     @asyncio.coroutine
     def joinChannel(self):
         """Joins the channel this socket is assigned to."""
-        prefix = "5:::"
+        prefix = "42"
         if self._nick == None:
             nick = "UnknownSoldier"
         else:
             nick = self._nick
-        j = json.dumps({
-            "name": "message",
-            "args": [
-                {
-                    "method": "joinChannel",
-                    "params": {
-                        "channel": self._channel,
-                        "name": nick,
-                        "token": self._logintoken,
-                        "isAdmin": False
-                    }
-                }
-            ]
-        })
+        j = json.dumps([
+            "message",
+            {
+                "method": "joinChannel",
+                "params": {
+                    "channel": self._channel,
+                    "name": nick,
+                    "token": self._logintoken
+                },
+                "service": "chat"
+            }
+        ])
         yield from self.send(prefix + j)
 
     @asyncio.coroutine
@@ -496,21 +497,21 @@ class HitboxClient:
             :text: Text to send.  Limited to 300 characters
 
         """
-        prefix = "5:::"
-        j = json.dumps({
-            "name": "message",
-            "args": [
-                {
-                    "method": "chatMsg",
-                    "params": {
-                        "channel": self._channel,
-                        "name": self._nick,
-                        "nameColor": self._namecolor,
-                        "text": text
-                    }
-                }
-            ]
-        })
+        prefix = "42"
+        j = json.dumps([
+            "message",
+            {
+                "method": "chatMsg",
+                "params": {
+                    "channel": self._channel,
+                    "name": self._nick,
+                    "nameColor": self._namecolor,
+                    "text": text,
+                    "id": "abcd"
+                },
+                "service": "chat"
+            }
+        ])
         yield from self.send(prefix + j)
 
     @asyncio.coroutine
